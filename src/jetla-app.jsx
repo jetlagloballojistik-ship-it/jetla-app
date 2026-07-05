@@ -46,9 +46,9 @@ const INIT = {
     {id:"k03",name:"Ali Demir",status:"off",km:0,earnings:0,bonus:0,packages:0,phone:"0534 333 33 33",balance:0,priorityRestId:null,region:null},
   ],
   restaurants:[
-    {id:"rest01",name:"BURGER HOUSE",balance:450,totalPackages:12,contact:"0532 111 22 33",address:"Kadıköy Bahariye Cad. No:42, İstanbul"},
-    {id:"rest02",name:"PIZZA PALACE",balance:0,totalPackages:7,contact:"0533 444 55 66",address:"Beşiktaş Barbaros Blv. No:18, İstanbul"},
-    {id:"rest03",name:"BARIŞ CAFE",balance:200,totalPackages:5,contact:"0534 555 66 77",address:"Şişli Halaskargazi Cad. No:91, İstanbul"},
+    {id:"rest01",name:"BURGER HOUSE",balance:450,totalPackages:12,contact:"0532 111 22 33",address:"Kadıköy Bahariye Cad. No:42, İstanbul",region:"Merkez"},
+    {id:"rest02",name:"PIZZA PALACE",balance:0,totalPackages:7,contact:"0533 444 55 66",address:"Beşiktaş Barbaros Blv. No:18, İstanbul",region:null},
+    {id:"rest03",name:"BARIŞ CAFE",balance:200,totalPackages:5,contact:"0534 555 66 77",address:"Şişli Halaskargazi Cad. No:91, İstanbul",region:null},
   ],
   packages:[
     {id:"32862",restaurant:"BURGER HOUSE",restId:"rest01",courier:"İzzet Kartal",courierId:"k01",status:"Teslim Edildi",time:"22:39",day:"",address:"Kadıköy Merkez",fee:35,paymentType:"Nakit",leftColor:"#4caf50"},
@@ -448,14 +448,6 @@ function LoginScreen({db,setUser,toast,save}){
           <button onClick={go} style={{padding:"13px",background:"#e53935",color:"#fff",border:"none",borderRadius:12,fontSize:11,fontWeight:700,cursor:"pointer"}}>Giriş Yap</button>
           <button onClick={()=>setMode("signup")} style={{padding:"11px",background:"#fff",color:"#e53935",border:"1.5px solid #e53935",borderRadius:12,fontSize:12,fontWeight:700,cursor:"pointer"}}>📝 Hesabım Yok — Üye Ol</button>
         </div>
-        <div style={{marginTop:20,paddingTop:16,borderTop:"1px solid #f2f2f7"}}>
-          <p style={{fontSize:11,color:"#8e8e93",fontWeight:600,marginBottom:8,textTransform:"uppercase"}}>Hızlı Giriş</p>
-          {[["admin","admin123","⚙️ Admin"],["rest01","rest123","🏪 Burger House"],["k01","kur123","🛵 İzzet (Kurye)"]].map(([id,p2,lbl])=>(
-            <button key={id} onClick={()=>{setU(id);setPw(p2);}} style={{display:"flex",justifyContent:"space-between",width:"100%",padding:"9px 10px",borderRadius:8,border:"none",background:"transparent",fontSize:11,color:"#636366",marginBottom:2,cursor:"pointer",textAlign:"left"}} onMouseEnter={e=>e.currentTarget.style.background="#f2f2f7"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-              <span>{lbl}</span><span style={{color:"#aeaeb2"}}>{id}/{p2}</span>
-            </button>
-          ))}
-        </div>
       </div>
     </div>
   );
@@ -842,12 +834,16 @@ function AdminCouriers({db,save,toast}){
 
 function AdminBusiness({db,save,toast}){
   const [showAdd,setShowAdd]=useState(false);
-  const [form,setForm]=useState({id:"",name:"",phone:"",pw:"",address:""});
-  const addRest=()=>{if(!form.id||!form.name)return;save({...db,users:{...db.users,[form.id]:{id:form.id,role:"restaurant",name:form.name,pw:form.pw||"1234"}},restaurants:[...db.restaurants,{id:form.id,name:form.name,balance:0,totalPackages:0,contact:form.phone,address:form.address}]});toast(form.name+" eklendi","success");setForm({id:"",name:"",phone:"",pw:"",address:""});setShowAdd(false);};
+  const [form,setForm]=useState({id:"",name:"",phone:"",pw:"",address:"",region:""});
+  const addRest=()=>{if(!form.id||!form.name)return;save({...db,users:{...db.users,[form.id]:{id:form.id,role:"restaurant",name:form.name,pw:form.pw||"1234"}},restaurants:[...db.restaurants,{id:form.id,name:form.name,balance:0,totalPackages:0,contact:form.phone,address:form.address,region:form.region||null}]});toast(form.name+" eklendi","success");setForm({id:"",name:"",phone:"",pw:"",address:"",region:""});setShowAdd(false);};
+  const setRegion=(id,region)=>{
+    save({...db,restaurants:db.restaurants.map(r=>r.id===id?{...r,region:region||null}:r)});
+    toast(region?("Bölge tanımlandı: "+region):"Bölge kaldırıldı","success");
+  };
   const pendingSignups = (db.signupRequests||[]).filter(r=>r.status==="bekliyor"&&r.role==="restaurant");
   const approveSignup = req => {
     if(db.users[req.userId]){ toast("Bu kullanıcı adı artık alınmış","error"); return; }
-    const newRest = {id:req.userId,name:req.name,balance:0,totalPackages:0,contact:req.phone,address:req.address,taxNo:req.taxNo||"",taxOffice:req.taxOffice||""};
+    const newRest = {id:req.userId,name:req.name,balance:0,totalPackages:0,contact:req.phone,address:req.address,taxNo:req.taxNo||"",taxOffice:req.taxOffice||"",region:null};
     save({
       ...db,
       users:{...db.users,[req.userId]:{id:req.userId,role:"restaurant",name:req.name,pw:req.pw}},
@@ -899,6 +895,14 @@ function AdminBusiness({db,save,toast}){
           <input value={form.address} onChange={e=>setForm(f=>({...f,address:e.target.value}))} placeholder="Mahalle, cadde, no, şehir" style={{width:"100%",padding:"9px 12px",border:"1.5px solid #e5e5ea",borderRadius:9,fontSize:11,outline:"none",background:"#f9f9f9",color:"#1c1c1e"}}/>
           <p style={{fontSize:10,color:"#aeaeb2",marginTop:3}}>Kurye bu adrese Google Haritalar üzerinden gidebilir</p>
         </div>
+        <div style={{marginBottom:12}}>
+          <p style={{fontSize:11,color:"#8e8e93",fontWeight:700,marginBottom:4,textTransform:"uppercase"}}>Bölge</p>
+          <select value={form.region} onChange={e=>setForm(f=>({...f,region:e.target.value}))}
+            style={{width:"100%",padding:"9px 12px",border:"1.5px solid #e5e5ea",borderRadius:9,fontSize:11,outline:"none",background:"#f9f9f9",color:"#1c1c1e"}}>
+            <option value="">— Bölge seçilmedi —</option>
+            {BOLGE.filter(b=>b!=="Hepsi").map(b=><option key={b} value={b}>{b}</option>)}
+          </select>
+        </div>
         <div style={{display:"flex",gap:8}}>
           <button onClick={addRest} style={{padding:"9px 20px",background:"#e53935",color:"#fff",border:"none",borderRadius:9,fontSize:11,fontWeight:700,cursor:"pointer"}}>Kaydet</button>
           <button onClick={()=>setShowAdd(false)} style={{padding:"9px 20px",background:"#f2f2f7",color:"#636366",border:"none",borderRadius:9,fontSize:11,cursor:"pointer"}}>İptal</button>
@@ -906,9 +910,22 @@ function AdminBusiness({db,save,toast}){
       </div>}
       <div style={{padding:"12px",display:"flex",flexDirection:"column",gap:8}}>
         {db.restaurants.map(r=>(
-          <div key={r.id} style={{background:"#fff",borderRadius:12,padding:"9px 12px",boxShadow:"0 1px 3px rgba(0,0,0,.06)",display:"flex",justifyContent:"space-between",alignItems:"center",borderLeft:"3px solid "+(r.balance===0?"#e53935":r.balance<100?"#f9a825":"#4caf50")}}>
-            <div><p style={{fontWeight:700,fontSize:11}}>{r.name}</p><p style={{fontSize:11,color:"#8e8e93",marginTop:2}}>{r.totalPackages} paket · {r.contact||"—"}</p>{r.taxNo&&<p style={{fontSize:11,color:"#8e8e93",marginTop:1}}>🏛️ {r.taxNo} · {r.taxOffice||"—"}</p>}</div>
-            <div style={{textAlign:"right"}}><p style={{fontWeight:800,fontSize:11,color:r.balance===0?"#e53935":r.balance<100?"#f9a825":"#4caf50"}}>₺{r.balance}</p><p style={{fontSize:11,fontWeight:700,color:r.balance===0?"#e53935":r.balance<100?"#f9a825":"#4caf50"}}>{r.balance===0?"Bakiye Yok":r.balance<100?"Düşük":"Aktif"}</p></div>
+          <div key={r.id} style={{background:"#fff",borderRadius:12,padding:"9px 12px",boxShadow:"0 1px 3px rgba(0,0,0,.06)",borderLeft:"3px solid "+(r.balance===0?"#e53935":r.balance<100?"#f9a825":"#4caf50")}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div><p style={{fontWeight:700,fontSize:11}}>{r.name}</p><p style={{fontSize:11,color:"#8e8e93",marginTop:2}}>{r.totalPackages} paket · {r.contact||"—"}</p>{r.taxNo&&<p style={{fontSize:11,color:"#8e8e93",marginTop:1}}>🏛️ {r.taxNo} · {r.taxOffice||"—"}</p>}</div>
+              <div style={{textAlign:"right"}}><p style={{fontWeight:800,fontSize:11,color:r.balance===0?"#e53935":r.balance<100?"#f9a825":"#4caf50"}}>₺{r.balance}</p><p style={{fontSize:11,fontWeight:700,color:r.balance===0?"#e53935":r.balance<100?"#f9a825":"#4caf50"}}>{r.balance===0?"Bakiye Yok":r.balance<100?"Düşük":"Aktif"}</p></div>
+            </div>
+            <div style={{background:r.region?"#e0f7fa":"#f9f9f9",borderRadius:9,padding:"8px 10px",border:r.region?"1px solid #00acc1":"1px solid transparent"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:5}}>
+                <span style={{fontSize:12}}>📍</span>
+                <p style={{fontSize:11,fontWeight:700,color:r.region?"#00acc1":"#636366"}}>Bölge</p>
+              </div>
+              <select value={r.region||""} onChange={e=>setRegion(r.id,e.target.value)}
+                style={{width:"100%",padding:"7px 9px",border:"1.5px solid "+(r.region?"#00acc1":"#e5e5ea"),borderRadius:8,fontSize:11,outline:"none",background:"#fff",color:"#1c1c1e",fontWeight:r.region?700:500}}>
+                <option value="">— Bölge atanmadı —</option>
+                {BOLGE.filter(b=>b!=="Hepsi").map(b=><option key={b} value={b}>{b}</option>)}
+              </select>
+            </div>
           </div>
         ))}
       </div>
