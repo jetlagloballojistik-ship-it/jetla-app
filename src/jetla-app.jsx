@@ -3225,11 +3225,11 @@ function CourierApp({user,db,save,setUser,toast}){
   const pending=myPkgs.filter(p=>p.status!=="Teslim Edildi"&&p.status!=="İptal");
   const setStatus=s=>{save({...db,couriers:db.couriers.map(c=>c.id===user.id?{...c,status:s}:c)});toast({active:"Aktif",break:"Mola",off:"Çevrimdışı"}[s]||s,"info");};
 
-  // Kurye "Aktif" durumdayken tarayıcının GPS'inden gerçek konumunu al ve düzenli güncelle
+  // Kurye uygulamayı açık tuttuğu sürece (durumundan bağımsız) tarayıcının GPS'inden gerçek konumunu al ve düzenli güncelle
   const dbRef = useRef(db);
   useEffect(()=>{ dbRef.current = db; },[db]);
   useEffect(()=>{
-    if(cData.status!=="active" || !navigator.geolocation) return;
+    if(!navigator.geolocation) return;
     const updateLocation = () => {
       navigator.geolocation.getCurrentPosition(
         pos => {
@@ -3244,7 +3244,7 @@ function CourierApp({user,db,save,setUser,toast}){
     updateLocation(); // hemen bir kez al
     const interval = setInterval(updateLocation, 30000); // sonra 30 saniyede bir güncelle
     return ()=>clearInterval(interval);
-  },[cData.status, user.id]);
+  },[user.id]);
 
   // Yeni atanan paketleri tespit et — hangi sekmede olursa olsun bildirim göster
   const knownAssignedIds = useRef(null);
