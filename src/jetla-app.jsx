@@ -1,5 +1,39 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
+import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import L from "leaflet";
+
+// Leaflet'in varsayılan pin ikonu Vite ile bozuk yüklenebiliyor, manuel düzeltiyoruz
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+});
+
+// Renkli pin ikonu üretir (durum bazlı renklendirme için)
+function coloredIcon(color){
+  return new L.DivIcon({
+    html: `<div style="background:${color};width:26px;height:26px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:2.5px solid #fff;box-shadow:0 2px 5px rgba(0,0,0,.35);"></div>`,
+    className: "",
+    iconSize: [26,26],
+    iconAnchor: [13,26],
+    popupAnchor: [0,-26],
+  });
+}
+
+// Adresten enlem/boylam bulur (OpenStreetMap Nominatim, ücretsiz, API key gerekmez).
+// Antalya odaklı arama yapar ki "Kadıköy" gibi genel isimler yanlış şehre gitmesin.
+async function geocodeAddress(address){
+  if(!address) return null;
+  try{
+    const q = encodeURIComponent(address+", Antalya, Türkiye");
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${q}`);
+    const data = await res.json();
+    if(data && data[0]) return {lat:+data[0].lat, lng:+data[0].lon};
+  }catch(e){ console.error("Geocoding hatası:",e); }
+  return null;
+}
 
 const supabase = createClient(
   "https://ofswgysmjvzmubjselod.supabase.co",
@@ -29,6 +63,37 @@ const PAY_TYPES_FLAT = [...new Set([...PAY_GROUPS["Kapıda"], ...PAY_GROUPS["Ön
 const STATUS_COLORS = {"Oluşturuldu":"#1e88e5","Onaylandı":"#fb8c00","Manuel Atama Bekliyor":"#f9a825","Otomatik Atama Bekliyor":"#fb8c00","Atama Onayı Bekliyor":"#8e24aa","Atandı":"#f9a825","Teslimat Aşamasında":"#1e88e5","Teslim Edildi":"#4caf50","İade":"#ff7043","İptal":"#9e9e9e","Geç Kalan":"#e53935"};
 
 function genId(){ return Math.random().toString(36).slice(2,7).toUpperCase(); }
+
+// Bir kuryenin üzerindeki aktif (henüz teslim edilmemiş) paket sayısını hesaplar
+function activeLoadOf(courierId, packages){
+  return packages.filter(p=>p.courierId===courierId && p.status!=="Teslim Edildi" && p.status!=="İptal").length;
+}
+
+// Bir kuryenin maksimum paket limitini döner: kurye özel limiti varsa o, yoksa genel ayar
+function maxPkgsOf(courierId, settings){
+  const special = settings.courierMaxPkgs?.[courierId];
+  return special!=null ? special : (settings.maxPkgs||10);
+}
+
+// Öncelikli kurye + limit kontrolü + en az yüklü kurye mantığıyla en uygun kuryeyi seçer.
+// restId verilirse önce o işletmenin öncelikli kuryesine bakar (limiti doluysa atlar).
+// Genel atama modu "manual" ise hiç otomatik seçim yapmaz (null döner, admin manuel atar).
+// Hiç uygun kurye yoksa null döner (limit dolu demektir).
+function pickCourierForAssignment(db, restId){
+  const s = db.settings||{};
+  if(s.assignMode==="manual") return null;
+  const active = db.couriers.filter(c=>c.status==="active");
+  const withRoom = active.filter(c=>activeLoadOf(c.id,db.packages) < maxPkgsOf(c.id,s));
+  if(withRoom.length===0) return null;
+
+  // Öncelikli kurye, limiti müsaitse önce o
+  if(restId){
+    const priority = withRoom.find(c=>c.priorityRestId===restId);
+    if(priority) return priority;
+  }
+  // Aksi halde en az yüklü (en boş) kurye
+  return [...withRoom].sort((a,b)=>activeLoadOf(a.id,db.packages)-activeLoadOf(b.id,db.packages))[0];
+}
 const nowTime = () => new Date().toLocaleTimeString("tr-TR",{hour:"2-digit",minute:"2-digit"});
 const todayStr = () => new Date().toLocaleDateString("tr-TR");
 
@@ -46,9 +111,9 @@ const INIT = {
     {id:"k03",name:"Ali Demir",status:"off",km:0,earnings:0,bonus:0,packages:0,phone:"0534 333 33 33",balance:0,priorityRestId:null,region:null},
   ],
   restaurants:[
-    {id:"rest01",name:"BURGER HOUSE",balance:450,totalPackages:12,contact:"0532 111 22 33",address:"Kadıköy Bahariye Cad. No:42, İstanbul",region:"Merkez"},
-    {id:"rest02",name:"PIZZA PALACE",balance:0,totalPackages:7,contact:"0533 444 55 66",address:"Beşiktaş Barbaros Blv. No:18, İstanbul",region:null},
-    {id:"rest03",name:"BARIŞ CAFE",balance:200,totalPackages:5,contact:"0534 555 66 77",address:"Şişli Halaskargazi Cad. No:91, İstanbul",region:null},
+    {id:"rest01",name:"BURGER HOUSE",balance:450,totalPackages:12,contact:"0532 111 22 33",address:"Muratpaşa, Şarampol Cad. No:42, Antalya",region:"Merkez",lat:36.8865,lng:30.7056},
+    {id:"rest02",name:"PIZZA PALACE",balance:0,totalPackages:7,contact:"0533 444 55 66",address:"Konyaaltı, Atatürk Blv. No:18, Antalya",region:null,lat:36.8721,lng:30.6499},
+    {id:"rest03",name:"BARIŞ CAFE",balance:200,totalPackages:5,contact:"0534 555 66 77",address:"Kepez, 1185 Sokak No:14, Antalya",region:null,lat:36.9354,lng:30.6832},
   ],
   packages:[
     {id:"32862",restaurant:"BURGER HOUSE",restId:"rest01",courier:"İzzet Kartal",courierId:"k01",status:"Teslim Edildi",time:"22:39",day:"",address:"Kadıköy Merkez",fee:35,paymentType:"Nakit",leftColor:"#4caf50"},
@@ -514,7 +579,7 @@ function BottomNav({tabs,active,setActive}){
   );
 }
 
-function PkgRow({pkg,onAction,couriers}){
+function PkgRow({pkg,onAction,couriers,allPackages,settings}){
   const [open,setOpen]=useState(false);
   const isUp=pkg.restaurant===pkg.restaurant.toUpperCase();
   return(
@@ -549,9 +614,16 @@ function PkgRow({pkg,onAction,couriers}){
                   {[...couriers.filter(c=>c.status==="active")].sort((a,b)=>{
                     const aP=a.priorityRestId===pkg.restId, bP=b.priorityRestId===pkg.restId;
                     return aP===bP?0:aP?-1:1;
-                  }).map(c=>(
-                    <option key={c.id} value={c.id}>{c.priorityRestId===pkg.restId?"⭐ ":""}{c.name}</option>
-                  ))}
+                  }).map(c=>{
+                    const load = allPackages ? activeLoadOf(c.id,allPackages) : null;
+                    const max = settings ? maxPkgsOf(c.id,settings) : null;
+                    const isFull = load!=null && max!=null && load>=max;
+                    return(
+                      <option key={c.id} value={c.id}>
+                        {c.priorityRestId===pkg.restId?"⭐ ":""}{c.name}{load!=null?" ("+load+"/"+max+")":""}{isFull?" 🔴 DOLU":""}
+                      </option>
+                    );
+                  })}
                 </select>
               )}
               {["Atandı","Teslimat Aşamasında","Teslim Edildi"].map(s=>(
@@ -610,20 +682,10 @@ function BizLocationModal({rest,onClose}){
 
 function MapModal({db,onClose,title}){
   const [sel,setSel]=useState(null);
-  const [pos,setPos]=useState(()=>db.couriers.map(c=>({...c,x:80+Math.random()*640,y:80+Math.random()*440,dx:(Math.random()-.5)*0.18,dy:(Math.random()-.5)*0.12})));
-  useEffect(()=>{
-    const id=setInterval(()=>{
-      setPos(ps=>ps.map(p=>{
-        if(p.status!=="active")return p;
-        let x=p.x+p.dx,y=p.y+p.dy,dx=p.dx,dy=p.dy;
-        if(x<40||x>760){dx=-dx;x=Math.max(40,Math.min(760,x));}
-        if(y<40||y>500){dy=-dy;y=Math.max(40,Math.min(500,y));}
-        return {...p,x,y,dx,dy};
-      }));
-    },2000);
-    return()=>clearInterval(id);
-  },[]);
   const sc={active:"#4caf50",break:"#f9a825",off:"#9e9e9e"};
+  const withCoords = db.couriers.filter(c=>c.lat && c.lng);
+  const mapCenter = withCoords[0] ? [withCoords[0].lat,withCoords[0].lng] : [36.8969, 30.7133]; // Antalya varsayılan
+
   return(
     <div style={{position:"fixed",inset:0,background:"#fff",zIndex:500,display:"flex",flexDirection:"column",maxWidth:430,margin:"0 auto"}}>
       <div style={{background:"#fff",padding:"9px 12px",borderBottom:"1px solid #e5e5ea",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
@@ -631,23 +693,26 @@ function MapModal({db,onClose,title}){
         <button onClick={onClose} style={{background:"#f2f2f7",border:"none",borderRadius:8,padding:"6px 14px",fontSize:11,fontWeight:700,color:"#636366",cursor:"pointer"}}>✕ Kapat</button>
       </div>
       <div style={{position:"relative",flex:1,background:"#e8f0e8",overflow:"hidden"}}>
-        <svg width="100%" height="100%" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid slice">
-          <rect width="800" height="560" fill="#e8f0e8"/>
-          {[0,1,2,3,4,5,6,7,8,9].map(i=><g key={i}><line x1={i*80} y1="0" x2={i*80} y2="560" stroke="rgba(255,255,255,.3)" strokeWidth="1"/><line x1="0" y1={i*56} x2="800" y2={i*56} stroke="rgba(255,255,255,.3)" strokeWidth="1"/></g>)}
-          {["M 0,200 Q 250,180 400,220 Q 550,260 800,210","M 380,0 Q 360,200 380,300 Q 400,420 380,560","M 0,380 Q 300,360 500,390 Q 650,410 800,370"].map((d,i)=>(
-            <path key={i} d={d} fill="none" stroke="#fff" strokeWidth={i===0?12:9} strokeLinecap="round" opacity=".8"/>
-          ))}
-          {pos.map(c=>(
-            <g key={c.id} onClick={()=>setSel(sel?.id===c.id?null:c)} style={{cursor:"pointer"}}>
-              {c.status==="active"&&<circle cx={c.x} cy={c.y} r="18" fill="none" stroke="#4caf50" strokeWidth="1.5" opacity=".4"><animate attributeName="r" values="12;22;12" dur="1.8s" repeatCount="indefinite"/><animate attributeName="opacity" values=".4;0;.4" dur="1.8s" repeatCount="indefinite"/></circle>}
-              <circle cx={c.x} cy={c.y} r="10" fill={sc[c.status]||"#9e9e9e"} stroke="#fff" strokeWidth="2.5"/>
-              <text x={c.x} y={c.y+4} textAnchor="middle" fontSize="10" fill="#fff">🛵</text>
-              <text x={c.x} y={c.y-15} textAnchor="middle" fontSize="10" fill="#1c1c1e" fontWeight="700">{c.name.split(" ")[0]}</text>
-              {sel?.id===c.id&&<g><rect x={c.x-55} y={c.y+14} width="110" height="44" rx="7" fill="rgba(255,255,255,.96)" stroke="#e5e5ea"/><text x={c.x} y={c.y+28} textAnchor="middle" fontSize="10" fill="#1c1c1e" fontWeight="700">{c.name}</text><text x={c.x} y={c.y+40} textAnchor="middle" fontSize="9" fill={sc[c.status]}>{c.status==="active"?"Aktif":c.status==="break"?"Mola":"Kapalı"}</text><text x={c.x} y={c.y+52} textAnchor="middle" fontSize="9" fill="#8e8e93">{c.km}km · ₺{c.earnings}</text></g>}
-            </g>
-          ))}
-        </svg>
-        <div style={{position:"absolute",top:10,left:10,background:"rgba(255,255,255,.92)",borderRadius:8,padding:"5px 12px",display:"flex",alignItems:"center",gap:6}}>
+        {withCoords.length>0 ? (
+          <MapContainer center={mapCenter} zoom={12} style={{height:"100%",width:"100%"}} scrollWheelZoom={true}>
+            <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+            {withCoords.map(c=>(
+              <Marker key={c.id} position={[c.lat,c.lng]} icon={coloredIcon(sc[c.status]||"#9e9e9e")} eventHandlers={{click:()=>setSel(sel?.id===c.id?null:c)}}>
+                <Popup>
+                  <strong>🛵 {c.name}</strong><br/>
+                  <span style={{color:sc[c.status]}}>{c.status==="active"?"Aktif":c.status==="break"?"Mola":"Kapalı"}</span><br/>
+                  {c.km}km · ₺{c.earnings}
+                </Popup>
+              </Marker>
+            ))}
+          </MapContainer>
+        ) : (
+          <div style={{height:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:8}}>
+            <p style={{fontSize:13,color:"#8e8e93",fontWeight:600}}>📍 Henüz konum verisi yok</p>
+            <p style={{fontSize:11,color:"#aeaeb2",textAlign:"center",maxWidth:240}}>Kurye "Aktif" durumuna geçtiğinde konumu otomatik olarak burada görünecek.</p>
+          </div>
+        )}
+        <div style={{position:"absolute",top:10,left:10,background:"rgba(255,255,255,.92)",borderRadius:8,padding:"5px 12px",display:"flex",alignItems:"center",gap:6,zIndex:1000}}>
           <span style={{width:7,height:7,borderRadius:"50%",background:"#4caf50",display:"inline-block",animation:"pulse 1.5s infinite"}}/>
           <span style={{fontSize:11,fontWeight:700,color:"#4caf50"}}>CANLI</span>
         </div>
@@ -661,7 +726,7 @@ function MapModal({db,onClose,title}){
               <div key={c.id} onClick={()=>setSel(sel?.id===c.id?null:c)} style={{flexShrink:0,background:bg,borderRadius:10,padding:"8px 12px",cursor:"pointer",border:"1.5px solid "+(sel?.id===c.id?tc:"transparent"),minWidth:100}}>
                 <p style={{fontWeight:700,fontSize:11}}>{c.name.split(" ")[0]}</p>
                 <p style={{fontSize:11,color:tc,fontWeight:600,marginTop:1}}>{c.status==="active"?"Aktif":c.status==="break"?"Mola":"Kapalı"}</p>
-                <p style={{fontSize:11,color:"#8e8e93",marginTop:1}}>{c.km}km·₺{c.earnings}</p>
+                <p style={{fontSize:11,color:"#8e8e93",marginTop:1}}>{c.km}km·₺{c.earnings}{!c.lat&&" · 📍—"}</p>
               </div>
             );
           })}
@@ -693,7 +758,7 @@ function AdminApp({user,db,save,setUser,toast}){
   return(
     <div style={{display:"flex",flexDirection:"column",flex:1,minHeight:"100vh"}}>
       {showMap&&<MapModal db={db} onClose={()=>setShowMap(false)} title="Admin Harita"/>}
-      {tab==="packages"&&<><TopBar bolge={bolge} setBolge={setBolge} filter={filter} setFilter={setFilter} onMapClick={()=>setShowMap(true)}/><div style={{flex:1,overflowY:"auto",background:"#fff"}}>{shown.length===0?<p style={{textAlign:"center",padding:"48px 20px",color:"#8e8e93"}}>Paket bulunamadı</p>:shown.map(p=><PkgRow key={p.id} pkg={p} onAction={act} couriers={db.couriers}/>)}</div></>}
+      {tab==="packages"&&<><TopBar bolge={bolge} setBolge={setBolge} filter={filter} setFilter={setFilter} onMapClick={()=>setShowMap(true)}/><div style={{flex:1,overflowY:"auto",background:"#fff"}}>{shown.length===0?<p style={{textAlign:"center",padding:"48px 20px",color:"#8e8e93"}}>Paket bulunamadı</p>:shown.map(p=><PkgRow key={p.id} pkg={p} onAction={act} couriers={db.couriers} allPackages={db.packages} settings={db.settings}/>)}</div></>}
       {tab==="couriers"&&<AdminCouriers db={db} save={save} toast={toast}/>}
       {tab==="business"&&<AdminBusiness db={db} save={save} toast={toast}/>}
       {tab==="profile"&&<AdminSettings user={user} db={db} save={save} setUser={setUser} toast={toast}/>}
@@ -835,15 +900,23 @@ function AdminCouriers({db,save,toast}){
 function AdminBusiness({db,save,toast}){
   const [showAdd,setShowAdd]=useState(false);
   const [form,setForm]=useState({id:"",name:"",phone:"",pw:"",address:"",region:""});
-  const addRest=()=>{if(!form.id||!form.name)return;save({...db,users:{...db.users,[form.id]:{id:form.id,role:"restaurant",name:form.name,pw:form.pw||"1234"}},restaurants:[...db.restaurants,{id:form.id,name:form.name,balance:0,totalPackages:0,contact:form.phone,address:form.address,region:form.region||null}]});toast(form.name+" eklendi","success");setForm({id:"",name:"",phone:"",pw:"",address:"",region:""});setShowAdd(false);};
+  const addRest=async()=>{
+    if(!form.id||!form.name)return;
+    const coords = await geocodeAddress(form.address);
+    save({...db,users:{...db.users,[form.id]:{id:form.id,role:"restaurant",name:form.name,pw:form.pw||"1234"}},restaurants:[...db.restaurants,{id:form.id,name:form.name,balance:0,totalPackages:0,contact:form.phone,address:form.address,region:form.region||null,lat:coords?.lat??null,lng:coords?.lng??null}]});
+    toast(form.name+" eklendi"+(coords?"":" (konum bulunamadı, harita gösteremeyebilir)"),coords?"success":"warning");
+    setForm({id:"",name:"",phone:"",pw:"",address:"",region:""});
+    setShowAdd(false);
+  };
   const setRegion=(id,region)=>{
     save({...db,restaurants:db.restaurants.map(r=>r.id===id?{...r,region:region||null}:r)});
     toast(region?("Bölge tanımlandı: "+region):"Bölge kaldırıldı","success");
   };
   const pendingSignups = (db.signupRequests||[]).filter(r=>r.status==="bekliyor"&&r.role==="restaurant");
-  const approveSignup = req => {
+  const approveSignup = async req => {
     if(db.users[req.userId]){ toast("Bu kullanıcı adı artık alınmış","error"); return; }
-    const newRest = {id:req.userId,name:req.name,balance:0,totalPackages:0,contact:req.phone,address:req.address,taxNo:req.taxNo||"",taxOffice:req.taxOffice||"",region:null};
+    const coords = await geocodeAddress(req.address);
+    const newRest = {id:req.userId,name:req.name,balance:0,totalPackages:0,contact:req.phone,address:req.address,taxNo:req.taxNo||"",taxOffice:req.taxOffice||"",region:null,lat:coords?.lat??null,lng:coords?.lng??null};
     save({
       ...db,
       users:{...db.users,[req.userId]:{id:req.userId,role:"restaurant",name:req.name,pw:req.pw}},
@@ -1036,6 +1109,22 @@ function AdminCourierFinanceView({db,save,toast}){
     setFeeForm(null);
   };
 
+  // Kurye özel maks. paket limiti
+  const [maxPkgsEdit,setMaxPkgsEdit] = useState(null); // {courierId, value}
+  const saveMaxPkgs = () => {
+    if(!maxPkgsEdit) return;
+    save({...db,settings:{...s,courierMaxPkgs:{...(s.courierMaxPkgs||{}),[maxPkgsEdit.courierId]:maxPkgsEdit.value}}});
+    toast("Maks. paket limiti kaydedildi","success");
+    setMaxPkgsEdit(null);
+  };
+  const clearMaxPkgs = courierId => {
+    const cm = {...(s.courierMaxPkgs||{})};
+    delete cm[courierId];
+    save({...db,settings:{...s,courierMaxPkgs:cm}});
+    toast("Genel limite döndürüldü","info");
+    setMaxPkgsEdit(null);
+  };
+
   // Tarih aralığı parse: t.date "DD.MM.YYYY" formatında (todayStr()), from/to input'lar "YYYY-MM-DD" formatında gelir
   const parseDate = d => {
     if(!d) return null;
@@ -1104,6 +1193,10 @@ function AdminCourierFinanceView({db,save,toast}){
         const kmFee = cf?.kmFee??s.kmFee??2.5;
         const kmInt = cf?.kmInterval??s.kmInterval??1;
         const isEditingFee = isOpen && feeForm!==null;
+        const maxPkgs = s.courierMaxPkgs?.[c.id] ?? s.maxPkgs ?? 10;
+        const hasCustomMax = s.courierMaxPkgs?.[c.id]!=null;
+        const currentLoad = activeLoadOf(c.id, db.packages);
+        const isEditingMaxPkgs = isOpen && maxPkgsEdit?.courierId===c.id;
 
         return(
           <div key={c.id} style={{background:"#fff",borderRadius:12,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,.05)"}}>
@@ -1173,6 +1266,41 @@ function AdminCourierFinanceView({db,save,toast}){
                       <div style={{display:"flex",gap:6}}>
                         <button onClick={()=>saveFee(c.id)} style={{flex:1,padding:"8px",background:"#1e88e5",color:"#fff",border:"none",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>Kaydet</button>
                         <button onClick={()=>setFeeForm(null)} style={{padding:"8px 14px",background:"#f2f2f7",color:"#636366",border:"none",borderRadius:8,fontSize:12,cursor:"pointer"}}>İptal</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Maks. Paket Limiti */}
+                <div style={{padding:"12px 14px",borderBottom:"1px solid #f2f2f7"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <p style={{fontSize:12,fontWeight:700,color:"#1c1c1e"}}>📦 Maks. Paket Limiti</p>
+                    {!isEditingMaxPkgs&&(
+                      <div style={{display:"flex",gap:6}}>
+                        {hasCustomMax&&<button onClick={()=>clearMaxPkgs(c.id)} style={{padding:"4px 9px",background:"#f2f2f7",color:"#636366",border:"none",borderRadius:6,fontSize:10,fontWeight:700,cursor:"pointer"}}>Sıfırla</button>}
+                        <button onClick={()=>setMaxPkgsEdit({courierId:c.id,value:maxPkgs})} style={{padding:"4px 10px",background:"#1e88e5",color:"#fff",border:"none",borderRadius:6,fontSize:10,fontWeight:700,cursor:"pointer"}}>Düzenle</button>
+                      </div>
+                    )}
+                  </div>
+
+                  {!isEditingMaxPkgs ? (
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <div style={{flex:1,background:"#fff",borderRadius:8,padding:"9px",textAlign:"center",border:"1px solid #f2f2f7"}}>
+                        <p style={{fontSize:15,fontWeight:800,color:"#1c1c1e"}}>{currentLoad} / {maxPkgs}</p>
+                        <p style={{fontSize:10,color:"#8e8e93",marginTop:2}}>{hasCustomMax?"Özel limit":"Genel limit"} — şu an aktif paket</p>
+                      </div>
+                      {currentLoad>=maxPkgs&&<span style={{fontSize:11,fontWeight:700,color:"#e53935",background:"#fdecea",padding:"5px 9px",borderRadius:7}}>DOLU</span>}
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={{marginBottom:10}}>
+                        <p style={{fontSize:10,color:"#8e8e93",fontWeight:700,textTransform:"uppercase",marginBottom:3}}>Aynı Anda Taşıyabileceği Maks. Paket</p>
+                        <input type="number" min="1" step="1" value={maxPkgsEdit.value} onChange={e=>setMaxPkgsEdit(m=>({...m,value:+e.target.value}))}
+                          style={{width:"100%",padding:"7px 9px",border:"1.5px solid #e5e5ea",borderRadius:7,fontSize:12,outline:"none",background:"#fff",color:"#1c1c1e",fontWeight:600}}/>
+                      </div>
+                      <div style={{display:"flex",gap:6}}>
+                        <button onClick={saveMaxPkgs} style={{flex:1,padding:"8px",background:"#1e88e5",color:"#fff",border:"none",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer"}}>Kaydet</button>
+                        <button onClick={()=>setMaxPkgsEdit(null)} style={{padding:"8px 14px",background:"#f2f2f7",color:"#636366",border:"none",borderRadius:8,fontSize:12,cursor:"pointer"}}>İptal</button>
                       </div>
                     </div>
                   )}
@@ -2099,6 +2227,7 @@ function ProfileGeneral({db,save,setUser,setSection}){
   const s = db.settings||{};
   const [f,setF] = useState({...s});
   const set = k=>e=>setF(x=>({...x,[k]:+e.target.value}));
+  const setMode = mode => setF(x=>({...x,assignMode:mode}));
 
   const [dailyTiers,setDailyTiers] = useState(s.dailyBonusTiers||[{pkgMin:10,bonus:20},{pkgMin:20,bonus:50},{pkgMin:30,bonus:100}]);
   const [weeklyTiers,setWeeklyTiers] = useState(s.weeklyBonusTiers||[{pkgMin:50,bonus:100},{pkgMin:100,bonus:250},{pkgMin:150,bonus:500}]);
@@ -2110,10 +2239,24 @@ function ProfileGeneral({db,save,setUser,setSection}){
   return(
     <div style={{padding:12,display:"flex",flexDirection:"column",gap:12}}>
 
+      {/* Atama Modu */}
+      <div style={{background:"#fff",borderRadius:12,padding:14,boxShadow:"0 1px 3px rgba(0,0,0,.06)"}}>
+        <p style={{fontWeight:700,fontSize:13,marginBottom:4}}>🎯 Paket Atama Modu</p>
+        <p style={{fontSize:11,color:"#8e8e93",marginBottom:10}}>İşletme "Kurye Çağır" dediğinde sistem nasıl davransın? Bu ayar tüm işletmeler için geçerlidir, işletme kendi ekranından değiştiremez.</p>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          {[["auto","🤖 Otomatik","En uygun kuryeye sistem otomatik atar"],["manual","✋ Manuel","Admin panelden elle atanmayı bekler"]].map(([id,l,desc])=>(
+            <button key={id} onClick={()=>setMode(id)} style={{padding:"12px 10px",borderRadius:10,border:"1.5px solid "+((f.assignMode||"auto")===id?"#e53935":"#e5e5ea"),background:(f.assignMode||"auto")===id?"#fdecea":"#fff",cursor:"pointer",textAlign:"left"}}>
+              <p style={{fontSize:12,fontWeight:700,color:(f.assignMode||"auto")===id?"#e53935":"#1c1c1e",marginBottom:3}}>{l}</p>
+              <p style={{fontSize:10,color:"#8e8e93",lineHeight:1.4}}>{desc}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Genel ücretler */}
       <div style={{background:"#fff",borderRadius:12,padding:14,boxShadow:"0 1px 3px rgba(0,0,0,.06)"}}>
         <p style={{fontWeight:700,fontSize:13,marginBottom:12}}>⚙️ Genel Ayarlar</p>
-        {[{k:"packageFee",l:"Paket Ücreti (₺)",tip:"İşletmeden alınan"},{k:"courierEarn",l:"Kurye Kazancı (₺)",tip:"Teslimat başı"},{k:"kmInterval",l:"Her Kaç KM",tip:"KM aralığı"},{k:"kmFee",l:"KM Ücreti (₺)",tip:"Aralık başı"},{k:"assignRadius",l:"Arama Yarıçapı (km)",tip:"Kurye atama mesafesi"}].map(field=>(
+        {[{k:"packageFee",l:"Paket Ücreti (₺)",tip:"İşletmeden alınan"},{k:"courierEarn",l:"Kurye Kazancı (₺)",tip:"Teslimat başı"},{k:"kmInterval",l:"Her Kaç KM",tip:"KM aralığı"},{k:"kmFee",l:"KM Ücreti (₺)",tip:"Aralık başı"},{k:"assignRadius",l:"Arama Yarıçapı (km)",tip:"Kurye atama mesafesi"},{k:"maxPkgs",l:"Genel Maks. Paket Limiti",tip:"Bir kuryenin aynı anda taşıyabileceği paket sayısı (özel limiti olmayan kuryeler için)"}].map(field=>(
           <div key={field.k} style={{marginBottom:10}}>
             <p style={{fontSize:10,color:"#8e8e93",fontWeight:600,marginBottom:3,textTransform:"uppercase"}}>{field.l}</p>
             <input type="number" step="0.5" value={f[field.k]||""} onChange={set(field.k)} style={{width:"100%",padding:"9px 11px",border:"1.5px solid #e5e5ea",borderRadius:9,fontSize:12,outline:"none",background:"#f9f9f9",color:"#1c1c1e"}}/>
@@ -2159,17 +2302,27 @@ function RestApp({user,db,save,setUser,toast}){
   const FEE=db.settings?.packageFee||35;
   const callCourier=async(opts={})=>{
     if(restData.balance<FEE||calling)return;
-    const avail=db.couriers.filter(c=>c.status==="active");
-    if(!avail.length){toast("Şu an aktif kurye yok","warning");return;}
     setCalling(true);
     await new Promise(r=>setTimeout(r,700));
-    // Öncelikli kurye varsa ve aktifse önce ona ata
-    const priorityCourier = avail.find(c=>c.priorityRestId===user.id);
-    const courier = priorityCourier || avail[0];
-    const pkg={id:genId(),restaurant:restData.name,restId:user.id,courier:courier.name,courierId:courier.id,status:"Atandı",time:nowTime(),day:"",address:opts.address||"(Adres girilmedi)",paymentType:opts.pay||"Belirtilmedi",fee:FEE,leftColor:"#4caf50"};
+    const deliveryCoords = await geocodeAddress(opts.address);
+    const isManualMode = (db.settings?.assignMode)==="manual";
+    // Öncelikli kurye + limit kontrolü + en az yüklü kurye mantığıyla en uygun kuryeyi seç
+    const courier = pickCourierForAssignment(db, user.id);
+    if(!courier && !isManualMode){toast("Şu an müsait kurye yok (tüm kuryeler kapasite dolu veya çevrimdışı)","warning");setCalling(false);return;}
+    if(!courier && isManualMode){
+      // Manuel atama modu: paket kuryesiz oluşturulur, admin'in ataması beklenir
+      const pkg={id:genId(),restaurant:restData.name,restId:user.id,courier:"",courierId:null,status:"Manuel Atama Bekliyor",time:nowTime(),day:"",address:opts.address||"(Adres girilmedi)",lat:deliveryCoords?.lat??null,lng:deliveryCoords?.lng??null,paymentType:opts.pay||"Belirtilmedi",fee:FEE,leftColor:"#f9a825"};
+      const updR=db.restaurants.map(r=>r.id===user.id?{...r,balance:r.balance-FEE,totalPackages:r.totalPackages+1}:r);
+      save({...db,packages:[...db.packages,pkg],restaurants:updR});
+      toast("📋 Paket oluşturuldu, admin ataması bekleniyor","info");
+      setCalling(false);
+      return;
+    }
+    const isPriority = courier.priorityRestId===user.id;
+    const pkg={id:genId(),restaurant:restData.name,restId:user.id,courier:courier.name,courierId:courier.id,status:"Atandı",time:nowTime(),day:"",address:opts.address||"(Adres girilmedi)",lat:deliveryCoords?.lat??null,lng:deliveryCoords?.lng??null,paymentType:opts.pay||"Belirtilmedi",fee:FEE,leftColor:"#4caf50"};
     const updR=db.restaurants.map(r=>r.id===user.id?{...r,balance:r.balance-FEE,totalPackages:r.totalPackages+1}:r);
     save({...db,packages:[...db.packages,pkg],restaurants:updR});
-    toast("✅ "+courier.name+(priorityCourier?" (öncelikli) ":" ")+"yola çıkıyor!","success");
+    toast("✅ "+courier.name+(isPriority?" (öncelikli) ":" ")+"yola çıkıyor!","success");
     setCalling(false);
   };
   const tabs=[{id:"order",label:"Kurye",icon:"🛵"},{id:"packages",label:"Paketler",icon:"📦"},{id:"map",label:"Harita",icon:"🗺️"},{id:"profile",label:"Profil",icon:"👤"}];
@@ -2269,19 +2422,30 @@ function RestIntegrations({db,save,user,restData,callCourier,calling,FEE,toast})
   const importOrder=async(platform,order)=>{
     if(restData.balance<FEE){toast("Yetersiz bakiye","error");return;}
     setImporting(order.id);
-    const avail=db.couriers.filter(c=>c.status==="active");
-    if(!avail.length){toast("Aktif kurye yok","warning");setImporting(null);return;}
     await new Promise(r=>setTimeout(r,800));
-    // Öncelikli kurye varsa ve aktifse önce ona ata
-    const priorityCourier = avail.find(c=>c.priorityRestId===user.id);
-    const courier = priorityCourier || avail[0];
-    const pkg={id:genId(),restaurant:restData.name,restId:user.id,courier:courier.name,courierId:courier.id,status:"Atandı",time:nowTime(),day:"",address:order.address,paymentType:order.payType,fee:FEE,leftColor:"#4caf50",platform:order.platform,platformOrderId:order.id,amount:order.amount};
+    const deliveryCoords = await geocodeAddress(order.address);
+    // Öncelikli kurye + limit kontrolü + en az yüklü kurye mantığıyla en uygun kuryeyi seç
+    const isManualMode = (db.settings?.assignMode)==="manual";
+    const courier = pickCourierForAssignment(db, user.id);
+    if(!courier && !isManualMode){toast("Şu an müsait kurye yok (tüm kuryeler kapasite dolu veya çevrimdışı)","warning");setImporting(null);return;}
+    if(!courier && isManualMode){
+      const pkg={id:genId(),restaurant:restData.name,restId:user.id,courier:"",courierId:null,status:"Manuel Atama Bekliyor",time:nowTime(),day:"",address:order.address,lat:deliveryCoords?.lat??null,lng:deliveryCoords?.lng??null,paymentType:order.payType,fee:FEE,leftColor:"#f9a825",platform:order.platform,platformOrderId:order.id,amount:order.amount};
+      const updR=db.restaurants.map(r=>r.id===user.id?{...r,balance:r.balance-FEE,totalPackages:r.totalPackages+1}:r);
+      save({...db,packages:[...db.packages,pkg],restaurants:updR});
+      const updOrders=cfg[platform].orders.filter(o=>o.id!==order.id);
+      saveCfg({...cfg,[platform]:{...cfg[platform],orders:updOrders}});
+      toast("📋 "+order.address+" → admin ataması bekleniyor","info");
+      setImporting(null);
+      return;
+    }
+    const isPriority = courier.priorityRestId===user.id;
+    const pkg={id:genId(),restaurant:restData.name,restId:user.id,courier:courier.name,courierId:courier.id,status:"Atandı",time:nowTime(),day:"",address:order.address,lat:deliveryCoords?.lat??null,lng:deliveryCoords?.lng??null,paymentType:order.payType,fee:FEE,leftColor:"#4caf50",platform:order.platform,platformOrderId:order.id,amount:order.amount};
     const updR=db.restaurants.map(r=>r.id===user.id?{...r,balance:r.balance-FEE,totalPackages:r.totalPackages+1}:r);
     save({...db,packages:[...db.packages,pkg],restaurants:updR});
     // Siparişi listeden çıkar
     const updOrders=cfg[platform].orders.filter(o=>o.id!==order.id);
     saveCfg({...cfg,[platform]:{...cfg[platform],orders:updOrders}});
-    toast("✅ "+courier.name+(priorityCourier?" (öncelikli)":"")+" → "+order.address,"success");
+    toast("✅ "+courier.name+(isPriority?" (öncelikli)":"")+" → "+order.address,"success");
     setImporting(null);
   };
 
@@ -2635,22 +2799,6 @@ function RestMapScreen({db,myPkgs,restData,callCourier,calling,FEE}){
   const donePkgs=myPkgs.filter(p=>p.status==="Teslim Edildi");
   const canCall=restData.balance>=FEE;
 
-  // Sabit işletme (sizin) konumu — harita merkezi
-  const bizPos = {x:400,y:240};
-  // Her aktif paketin teslimat noktası, işletme etrafına dağıtılmış (gösterim amaçlı, sabit seed)
-  const taskPositions = activePkgs.map(p=>{
-    const seed = (p.id.charCodeAt(0)||50)+(p.id.charCodeAt(p.id.length-1)||50);
-    const ang = (seed%360)*(Math.PI/180);
-    const dist = 100+((seed*7)%80);
-    return {pkg:p,x:bizPos.x+Math.cos(ang)*dist,y:bizPos.y+Math.sin(ang)*dist};
-  });
-
-  const getETA=pkg=>{
-    if(pkg.status==="Atandı") return "Kurye yola çıkmadı";
-    if(pkg.status==="Onaylandı") return "Kurye onayladı, geliyor";
-    return "~"+(5+Math.floor(Math.random()*15))+" dk";
-  };
-
   return(
     <div style={{flex:1,display:"flex",flexDirection:"column",background:"#f2f2f7"}}>
       <div style={{background:"#fff",padding:"9px 12px",borderBottom:"1px solid #e5e5ea",flexShrink:0}}>
@@ -2667,67 +2815,30 @@ function RestMapScreen({db,myPkgs,restData,callCourier,calling,FEE}){
       </div>
 
       <div style={{position:"relative",height:300,flexShrink:0,background:"#e8f0e8",overflow:"hidden"}}>
-        <svg width="100%" height="100%" viewBox="0 0 800 480" preserveAspectRatio="xMidYMid slice">
-          <rect width="800" height="480" fill="#e8f0e8"/>
-          {[0,1,2,3,4,5,6,7,8,9].map(i=><g key={i}><line x1={i*80} y1="0" x2={i*80} y2="480" stroke="rgba(255,255,255,.3)" strokeWidth="1"/><line x1="0" y1={i*48} x2="800" y2={i*48} stroke="rgba(255,255,255,.3)" strokeWidth="1"/></g>)}
-          {["M 0,180 Q 250,160 400,200 Q 550,240 800,190","M 380,0 Q 360,180 380,260 Q 400,360 380,480","M 0,360 Q 300,340 500,370 Q 650,390 800,350"].map((d,i)=>(
-            <path key={i} d={d} fill="none" stroke="#fff" strokeWidth={i===0?12:9} strokeLinecap="round" opacity=".8"/>
-          ))}
-
-          {/* İşletme konumu — sabit merkez */}
-          <g>
-            <circle cx={bizPos.x} cy={bizPos.y} r="14" fill="#e53935" stroke="#fff" strokeWidth="3"/>
-            <text x={bizPos.x} y={bizPos.y+4} textAnchor="middle" fontSize="12" fill="#fff">🏪</text>
-            <text x={bizPos.x} y={bizPos.y-20} textAnchor="middle" fontSize="10" fill="#e53935" fontWeight="800">SİZ</text>
-          </g>
-
-          {/* Bekleyen (henüz kurye atanmamış) siparişler */}
-          {waitPkgs.slice(0,4).map((p,i)=>(
-            <g key={p.id}>
-              <circle cx={bizPos.x-60+i*40} cy={bizPos.y+40} r="9" fill="#f9a825" stroke="#fff" strokeWidth="2" opacity=".85"/>
-              <text x={bizPos.x-60+i*40} y={bizPos.y+44} textAnchor="middle" fontSize="8" fill="#fff">⏳</text>
-            </g>
-          ))}
-
-          {/* Teslimat noktaları — durum rengiyle */}
-          {taskPositions.map(({pkg,x,y})=>{
-            const isSel = selPin===pkg.id;
-            const pinColor = STATUS_COLORS[pkg.status]||"#8e8e93";
-            return(
-              <g key={pkg.id}>
-                <line x1={bizPos.x} y1={bizPos.y} x2={x} y2={y} stroke={pinColor} strokeWidth="1.5" strokeDasharray="4,3" opacity=".5"/>
-                <g onClick={()=>setSelPin(isSel?null:pkg.id)} style={{cursor:"pointer"}}>
-                  {pkg.status==="Teslimat Aşamasında"&&(
-                    <circle cx={x} cy={y} r="16" fill="none" stroke={pinColor} strokeWidth="1.5" opacity=".4">
-                      <animate attributeName="r" values="12;20;12" dur="1.8s" repeatCount="indefinite"/>
-                      <animate attributeName="opacity" values=".4;0;.4" dur="1.8s" repeatCount="indefinite"/>
-                    </circle>
-                  )}
-                  <circle cx={x} cy={y} r="11" fill={pinColor} stroke="#fff" strokeWidth="2.5"/>
-                  <text x={x} y={y+4} textAnchor="middle" fontSize="10" fill="#fff">📍</text>
-                  {isSel&&(
-                    <g>
-                      <rect x={x-72} y={y+15} width="144" height="56" rx="8" fill="rgba(255,255,255,.97)" stroke="#e5e5ea"/>
-                      <text x={x} y={y+30} textAnchor="middle" fontSize="10" fontFamily="monospace" fill="#e53935" fontWeight="700">#{pkg.id}</text>
-                      <text x={x} y={y+43} textAnchor="middle" fontSize="9" fill="#1c1c1e" fontWeight="700">{pkg.courier||"—"}</text>
-                      <text x={x} y={y+56} textAnchor="middle" fontSize="9" fill={pinColor} fontWeight="700">{getETA(pkg)}</text>
-                    </g>
-                  )}
-                </g>
-              </g>
-            );
-          })}
-
-          {activePkgs.length===0&&waitPkgs.length===0&&(
-            <g>
-              <rect x="220" y="200" width="360" height="56" rx="12" fill="rgba(255,255,255,.9)" stroke="#e5e5ea"/>
-              <text x="400" y="224" textAnchor="middle" fontSize="13" fill="#8e8e93" fontWeight="600">Şu an aktif paketiniz yok</text>
-              <text x="400" y="242" textAnchor="middle" fontSize="11" fill="#aeaeb2">Kurye çağırınca burada görünecek</text>
-            </g>
-          )}
-        </svg>
-        <div style={{position:"absolute",top:10,left:10,background:"rgba(255,255,255,.92)",borderRadius:8,padding:"5px 12px",display:"flex",alignItems:"center",gap:6}}><span style={{width:7,height:7,borderRadius:"50%",background:"#4caf50",display:"inline-block",animation:"pulse 1.5s infinite"}}/><span style={{fontSize:11,fontWeight:700,color:"#4caf50"}}>CANLI TAKİP</span></div>
-        <div style={{position:"absolute",bottom:10,right:10,background:"rgba(255,255,255,.92)",borderRadius:9,padding:"8px 12px",fontSize:11}}>
+        {restData.lat && restData.lng ? (
+          <MapContainer center={[restData.lat,restData.lng]} zoom={14} style={{height:"100%",width:"100%"}} scrollWheelZoom={false}>
+            <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+            <Marker position={[restData.lat,restData.lng]} icon={coloredIcon("#e53935")}>
+              <Popup>🏪 {restData.name} (Sizin işletmeniz)</Popup>
+            </Marker>
+            {activePkgs.filter(p=>p.lat&&p.lng).map(p=>(
+              <Marker key={p.id} position={[p.lat,p.lng]} icon={coloredIcon(STATUS_COLORS[p.status]||"#8e8e93")} eventHandlers={{click:()=>setSelPin(p.id)}}>
+                <Popup>
+                  <strong>#{p.id}</strong><br/>
+                  {p.courier||"—"}<br/>
+                  <span style={{color:STATUS_COLORS[p.status]}}>{p.status}</span>
+                </Popup>
+              </Marker>
+            ))}
+          </MapContainer>
+        ) : (
+          <div style={{height:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:8}}>
+            <p style={{fontSize:13,color:"#8e8e93",fontWeight:600}}>📍 İşletme konumu bulunamadı</p>
+            <p style={{fontSize:11,color:"#aeaeb2",textAlign:"center",maxWidth:220}}>Admin panelinden adresinizi güncelleyerek haritada görünmenizi sağlayabilirsiniz.</p>
+          </div>
+        )}
+        <div style={{position:"absolute",top:10,left:10,background:"rgba(255,255,255,.92)",borderRadius:8,padding:"5px 12px",display:"flex",alignItems:"center",gap:6,zIndex:1000}}><span style={{width:7,height:7,borderRadius:"50%",background:"#4caf50",display:"inline-block",animation:"pulse 1.5s infinite"}}/><span style={{fontSize:11,fontWeight:700,color:"#4caf50"}}>CANLI TAKİP</span></div>
+        <div style={{position:"absolute",bottom:10,right:10,background:"rgba(255,255,255,.92)",borderRadius:9,padding:"8px 12px",fontSize:11,zIndex:1000}}>
           {[["#f9a825","Atandı"],["#fb8c00","Onaylandı"],["#1e88e5","Teslim Alındı"],["#4caf50","Teslim Edildi"]].map(([c,l])=>(
             <div key={l} style={{display:"flex",alignItems:"center",gap:5,marginBottom:2}}>
               <span style={{width:9,height:9,borderRadius:"50%",background:c,display:"inline-block"}}/>
@@ -2914,19 +3025,17 @@ function CourierMapScreen({db,user,myPkgs,onOpenBiz,onOpenTask,updPkg}){
   const [selPin,setSelPin] = useState(null);
   const activeTasks = myPkgs.filter(p=>p.status==="Atandı"||p.status==="Onaylandı"||p.status==="Teslimat Aşamasında");
   const pendingTasks = activeTasks;
+  const cData = db.couriers.find(c=>c.id===user.id);
 
-  // İşletmeleri sahte sabit koordinatlara yerleştir (gösterim amaçlı)
-  const restPositions = {};
-  db.restaurants.forEach((r,i)=>{
-    restPositions[r.id] = {x:150+(i%3)*220, y:120+Math.floor(i/3)*180};
-  });
-  // Her görevin teslimat noktası, işletme konumuna yakın rastgele bir nokta (gösterim amaçlı, sabit seed)
-  const taskPositions = activeTasks.map((p,i)=>{
-    const base = restPositions[p.restId]||{x:400,y:300};
-    const seed = (p.id.charCodeAt(0)||50)+(p.id.charCodeAt(p.id.length-1)||50);
-    const ang = (seed%360)*(Math.PI/180);
-    return {pkg:p,x:base.x+Math.cos(ang)*90,y:base.y+Math.sin(ang)*90,restPos:base};
-  });
+  // Gerçek koordinatı olan işletmeler ve teslimat noktaları (koordinatı olmayanlar haritada gösterilemez)
+  const restsWithTasks = db.restaurants.filter(r=>activeTasks.some(p=>p.restId===r.id) && r.lat && r.lng);
+  const tasksWithCoords = activeTasks.filter(p=>p.lat && p.lng);
+
+  // Haritanın merkezi: kurye konumu varsa o, yoksa ilk işletme, yoksa Antalya
+  const mapCenter = cData?.lat && cData?.lng
+    ? [cData.lat, cData.lng]
+    : restsWithTasks[0] ? [restsWithTasks[0].lat, restsWithTasks[0].lng]
+    : [36.8969, 30.7133]; // Antalya merkez, hiç konum yoksa varsayılan
 
   return(
     <div style={{flex:1,display:"flex",flexDirection:"column",background:"#f2f2f7",position:"relative"}}>
@@ -2969,83 +3078,60 @@ function CourierMapScreen({db,user,myPkgs,onOpenBiz,onOpenTask,updPkg}){
 
       {/* Harita alanı */}
       <div style={{position:"relative",flex:1,background:"#e8f0e8",overflow:"hidden"}}>
-        <svg width="100%" height="100%" viewBox="0 0 800 560" preserveAspectRatio="xMidYMid slice">
-          <rect width="800" height="560" fill="#e8f0e8"/>
-          {[0,1,2,3,4,5,6,7,8,9].map(i=>(
-            <g key={i}>
-              <line x1={i*80} y1="0" x2={i*80} y2="560" stroke="rgba(255,255,255,.35)" strokeWidth="1"/>
-              <line x1="0" y1={i*56} x2="800" y2={i*56} stroke="rgba(255,255,255,.35)" strokeWidth="1"/>
-            </g>
-          ))}
-          {["M 0,200 Q 250,180 400,220 Q 550,260 800,210","M 380,0 Q 360,200 380,300 Q 400,420 380,560","M 0,380 Q 300,360 500,390 Q 650,410 800,370"].map((d,i)=>(
-            <path key={i} d={d} fill="none" stroke="#fff" strokeWidth={i===0?12:10} strokeLinecap="round" opacity=".8"/>
-          ))}
+        <MapContainer center={mapCenter} zoom={13} style={{height:"100%",width:"100%"}} scrollWheelZoom={true}>
+          <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
+
+          {/* Kuryenin kendi konumu */}
+          {cData?.lat && cData?.lng && (
+            <Marker position={[cData.lat,cData.lng]} icon={coloredIcon("#1e88e5")}>
+              <Popup>🛵 Siz buradasınız</Popup>
+            </Marker>
+          )}
 
           {/* İşletme — toplama noktaları (paketi olanlar) */}
-          {db.restaurants.filter(r=>activeTasks.some(p=>p.restId===r.id)).map(r=>{
-            const pos = restPositions[r.id];
-            const isSel = selPin?.type==="rest" && selPin.id===r.id;
+          {restsWithTasks.map(r=>{
             const restTasks = activeTasks.filter(p=>p.restId===r.id);
-            // Bu işletmedeki en "ileri" durumu pin rengi için kullan: Teslimat Aşamasında > Atandı
             const dominant = restTasks.some(p=>p.status==="Teslimat Aşamasında") ? "Teslimat Aşamasında"
                             : restTasks.some(p=>p.status==="Onaylandı") ? "Onaylandı"
                             : "Atandı";
             const pinColor = STATUS_COLORS[dominant]||"#e53935";
             return(
-              <g key={r.id} onClick={()=>setSelPin(isSel?null:{type:"rest",id:r.id})} style={{cursor:"pointer"}}>
-                <circle cx={pos.x} cy={pos.y} r="14" fill={pinColor} stroke="#fff" strokeWidth="2.5"/>
-                <text x={pos.x} y={pos.y+5} textAnchor="middle" fontSize="13" fill="#fff">🏪</text>
-                <text x={pos.x} y={pos.y-20} textAnchor="middle" fontSize="11" fill="#1c1c1e" fontWeight="700">{r.name.split(" ")[0]}</text>
-                {isSel&&(
-                  <g>
-                    <rect x={pos.x-70} y={pos.y+18} width="140" height="50" rx="8" fill="rgba(255,255,255,.97)" stroke="#e5e5ea"/>
-                    <text x={pos.x} y={pos.y+34} textAnchor="middle" fontSize="11" fill="#1c1c1e" fontWeight="700">{r.name}</text>
-                    <text x={pos.x} y={pos.y+47} textAnchor="middle" fontSize="9" fill="#8e8e93">{restTasks.length} paket bekliyor</text>
-                    <text x={pos.x} y={pos.y+60} textAnchor="middle" fontSize="9" fill="#1e88e5" fontWeight="700">Detay için dokun ⌄</text>
-                  </g>
-                )}
-              </g>
+              <Marker key={r.id} position={[r.lat,r.lng]} icon={coloredIcon(pinColor)} eventHandlers={{click:()=>setSelPin({type:"rest",id:r.id})}}>
+                <Popup>
+                  <strong>🏪 {r.name}</strong><br/>
+                  {restTasks.length} paket bekliyor
+                </Popup>
+              </Marker>
             );
           })}
 
           {/* Teslimat noktaları — müşteri adresleri */}
-          {taskPositions.map(({pkg,x,y,restPos})=>{
-            const isSel = selPin?.type==="task" && selPin.id===pkg.id;
+          {tasksWithCoords.map(pkg=>{
             const pinColor = STATUS_COLORS[pkg.status]||"#8e24aa";
             return(
-              <g key={pkg.id}>
-                <line x1={restPos.x} y1={restPos.y} x2={x} y2={y} stroke={pinColor} strokeWidth="1.5" strokeDasharray="4,3" opacity=".5"/>
-                <g onClick={()=>setSelPin(isSel?null:{type:"task",id:pkg.id})} style={{cursor:"pointer"}}>
-                  <circle cx={x} cy={y} r="11" fill={pinColor} stroke="#fff" strokeWidth="2.5"/>
-                  <text x={x} y={y+4} textAnchor="middle" fontSize="11" fill="#fff">📍</text>
-                  {isSel&&(
-                    <g>
-                      <rect x={x-75} y={y+15} width="150" height="62" rx="8" fill="rgba(255,255,255,.97)" stroke="#e5e5ea"/>
-                      <text x={x} y={y+31} textAnchor="middle" fontSize="10" fontFamily="monospace" fill="#e53935" fontWeight="700">#{pkg.id}</text>
-                      <text x={x} y={y+44} textAnchor="middle" fontSize="9" fill="#1c1c1e">{(pkg.address||"").slice(0,22)}</text>
-                      <text x={x} y={y+57} textAnchor="middle" fontSize="9" fill={PAY_COLORS[pkg.paymentType]||"#8e8e93"} fontWeight="700">{pkg.paymentType||"—"}</text>
-                      <text x={x} y={y+70} textAnchor="middle" fontSize="9" fill="#1e88e5" fontWeight="700">Detay için dokun ⌄</text>
-                    </g>
-                  )}
-                </g>
-              </g>
+              <Marker key={pkg.id} position={[pkg.lat,pkg.lng]} icon={coloredIcon(pinColor)} eventHandlers={{click:()=>setSelPin({type:"task",id:pkg.id})}}>
+                <Popup>
+                  <strong>#{pkg.id}</strong><br/>
+                  {pkg.address}<br/>
+                  <span style={{color:pinColor}}>{pkg.status}</span>
+                </Popup>
+              </Marker>
             );
           })}
+        </MapContainer>
 
-          {pendingTasks.length===0&&(
-            <g>
-              <rect x="230" y="240" width="340" height="70" rx="12" fill="rgba(255,255,255,.9)" stroke="#e5e5ea"/>
-              <text x="400" y="270" textAnchor="middle" fontSize="13" fill="#8e8e93" fontWeight="600">Şu an aktif göreviniz yok</text>
-              <text x="400" y="288" textAnchor="middle" fontSize="11" fill="#aeaeb2">Yeni paket atandığında burada görünecek</text>
-            </g>
-          )}
-        </svg>
+        {pendingTasks.length===0&&(
+          <div style={{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",background:"rgba(255,255,255,.95)",borderRadius:12,padding:"16px 22px",boxShadow:"0 2px 10px rgba(0,0,0,.1)",zIndex:1000,textAlign:"center"}}>
+            <p style={{fontSize:13,color:"#8e8e93",fontWeight:600}}>Şu an aktif göreviniz yok</p>
+            <p style={{fontSize:11,color:"#aeaeb2",marginTop:3}}>Yeni paket atandığında burada görünecek</p>
+          </div>
+        )}
 
-        <div style={{position:"absolute",top:12,left:12,background:"rgba(255,255,255,.92)",borderRadius:8,padding:"5px 12px",display:"flex",alignItems:"center",gap:6}}>
+        <div style={{position:"absolute",top:12,left:12,background:"rgba(255,255,255,.92)",borderRadius:8,padding:"5px 12px",display:"flex",alignItems:"center",gap:6,zIndex:1000}}>
           <span style={{width:7,height:7,borderRadius:"50%",background:"#4caf50",display:"inline-block",animation:"pulse 1.5s infinite"}}/>
           <span style={{fontSize:11,fontWeight:700,color:"#4caf50"}}>CANLI</span>
         </div>
-        <div style={{position:"absolute",bottom:10,right:10,background:"rgba(255,255,255,.92)",borderRadius:9,padding:"8px 12px",fontSize:11}}>
+        <div style={{position:"absolute",bottom:10,right:10,background:"rgba(255,255,255,.92)",borderRadius:9,padding:"8px 12px",fontSize:11,zIndex:1000}}>
           {[["#f9a825","Atandı"],["#fb8c00","Onaylandı"],["#1e88e5","Teslim Alındı"]].map(([c,l])=>(
             <div key={l} style={{display:"flex",alignItems:"center",gap:5,marginBottom:2}}>
               <span style={{width:9,height:9,borderRadius:"50%",background:c,display:"inline-block"}}/>
@@ -3138,6 +3224,27 @@ function CourierApp({user,db,save,setUser,toast}){
   const myPkgs=db.packages.filter(p=>p.courierId===user.id);
   const pending=myPkgs.filter(p=>p.status!=="Teslim Edildi"&&p.status!=="İptal");
   const setStatus=s=>{save({...db,couriers:db.couriers.map(c=>c.id===user.id?{...c,status:s}:c)});toast({active:"Aktif",break:"Mola",off:"Çevrimdışı"}[s]||s,"info");};
+
+  // Kurye "Aktif" durumdayken tarayıcının GPS'inden gerçek konumunu al ve düzenli güncelle
+  const dbRef = useRef(db);
+  useEffect(()=>{ dbRef.current = db; },[db]);
+  useEffect(()=>{
+    if(cData.status!=="active" || !navigator.geolocation) return;
+    const updateLocation = () => {
+      navigator.geolocation.getCurrentPosition(
+        pos => {
+          const {latitude,longitude} = pos.coords;
+          const latest = dbRef.current;
+          save({...latest, couriers: latest.couriers.map(c=>c.id===user.id?{...c,lat:latitude,lng:longitude}:c)});
+        },
+        err => console.warn("Konum alınamadı:", err.message),
+        {enableHighAccuracy:true, timeout:8000}
+      );
+    };
+    updateLocation(); // hemen bir kez al
+    const interval = setInterval(updateLocation, 30000); // sonra 30 saniyede bir güncelle
+    return ()=>clearInterval(interval);
+  },[cData.status, user.id]);
 
   // Yeni atanan paketleri tespit et — hangi sekmede olursa olsun bildirim göster
   const knownAssignedIds = useRef(null);
