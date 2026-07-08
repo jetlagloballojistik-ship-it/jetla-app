@@ -22,6 +22,23 @@ function coloredIcon(color){
   });
 }
 
+// Kurye pin'i: renkli daire + emoji (motor veya paket) + altında isim etiketi.
+// emoji parametresi verilmezse motor (🛵) kullanılır, paket taşırken 📦 verilir.
+function courierIcon(color, name, emoji="🛵"){
+  const label = name ? name.split(" ")[0] : "";
+  return new L.DivIcon({
+    html: `
+      <div style="display:flex;flex-direction:column;align-items:center;transform:translateY(-4px);">
+        <div style="background:${color};width:32px;height:32px;border-radius:50%;border:2.5px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;font-size:16px;">${emoji}</div>
+        <div style="background:#fff;border-radius:5px;padding:1px 6px;margin-top:2px;font-size:10px;font-weight:700;color:#1c1c1e;box-shadow:0 1px 3px rgba(0,0,0,.25);white-space:nowrap;">${label}</div>
+      </div>`,
+    className: "",
+    iconSize: [32,50],
+    iconAnchor: [16,32],
+    popupAnchor: [0,-32],
+  });
+}
+
 // Adresten enlem/boylam bulur (OpenStreetMap Nominatim, ücretsiz, API key gerekmez).
 // Antalya odaklı arama yapar ki "Kadıköy" gibi genel isimler yanlış şehre gitmesin.
 async function geocodeAddress(address){
@@ -682,9 +699,24 @@ function BizLocationModal({rest,onClose}){
 
 function MapModal({db,onClose,title}){
   const [sel,setSel]=useState(null);
-  const sc={active:"#4caf50",break:"#f9a825",off:"#9e9e9e"};
+  // Kurye durumu renkleri: Kapalı=kırmızı, Aktif=yeşil, Mola=sarı
+  const sc={active:"#4caf50",break:"#f9a825",off:"#e53935"};
   const withCoords = db.couriers.filter(c=>c.lat && c.lng);
   const mapCenter = withCoords[0] ? [withCoords[0].lat,withCoords[0].lng] : [36.8969, 30.7133]; // Antalya varsayılan
+
+  // Bir kuryenin üzerindeki aktif (henüz teslim edilmemiş) paketini bulur
+  const activePkgOf = courierId => db.packages.find(p=>p.courierId===courierId && p.status!=="Teslim Edildi" && p.status!=="İptal");
+
+  // Pin'in rengini ve emojisini belirler: paket varsa paket durumu öncelikli, yoksa kurye durumu
+  const pinFor = courier => {
+    const pkg = activePkgOf(courier.id);
+    if(pkg){
+      // Onaylandı=turuncu, Teslimat Aşamasında (teslimatta)=mavi, diğer ara durumlar STATUS_COLORS'tan
+      const color = STATUS_COLORS[pkg.status] || "#8e8e93";
+      return {color, emoji:"📦"};
+    }
+    return {color: sc[courier.status]||"#e53935", emoji:"🛵"};
+  };
 
   return(
     <div style={{position:"fixed",inset:0,background:"#fff",zIndex:500,display:"flex",flexDirection:"column",maxWidth:430,margin:"0 auto"}}>
@@ -696,36 +728,53 @@ function MapModal({db,onClose,title}){
         {withCoords.length>0 ? (
           <MapContainer center={mapCenter} zoom={12} style={{height:"100%",width:"100%"}} scrollWheelZoom={true}>
             <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"/>
-            {withCoords.map(c=>(
-              <Marker key={c.id} position={[c.lat,c.lng]} icon={coloredIcon(sc[c.status]||"#9e9e9e")} eventHandlers={{click:()=>setSel(sel?.id===c.id?null:c)}}>
-                <Popup>
-                  <strong>🛵 {c.name}</strong><br/>
-                  <span style={{color:sc[c.status]}}>{c.status==="active"?"Aktif":c.status==="break"?"Mola":"Kapalı"}</span><br/>
-                  {c.km}km · ₺{c.earnings}
-                </Popup>
-              </Marker>
-            ))}
+            {withCoords.map(c=>{
+              const {color,emoji} = pinFor(c);
+              const pkg = activePkgOf(c.id);
+              return(
+                <Marker key={c.id} position={[c.lat,c.lng]} icon={courierIcon(color,c.name,emoji)} eventHandlers={{click:()=>setSel(sel?.id===c.id?null:c)}}>
+                  <Popup>
+                    <strong>🛵 {c.name}</strong><br/>
+                    {pkg ? (
+                      <span style={{color}}>📦 #{pkg.id} — {pkg.status}</span>
+                    ) : (
+                      <span style={{color:sc[c.status]}}>{c.status==="active"?"Aktif":c.status==="break"?"Mola":"Kapalı"}</span>
+                    )}<br/>
+                    {c.km}km · ₺{c.earnings}
+                  </Popup>
+                </Marker>
+              );
+            })}
           </MapContainer>
         ) : (
           <div style={{height:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:8}}>
             <p style={{fontSize:13,color:"#8e8e93",fontWeight:600}}>📍 Henüz konum verisi yok</p>
-            <p style={{fontSize:11,color:"#aeaeb2",textAlign:"center",maxWidth:240}}>Kurye "Aktif" durumuna geçtiğinde konumu otomatik olarak burada görünecek.</p>
+            <p style={{fontSize:11,color:"#aeaeb2",textAlign:"center",maxWidth:240}}>Kurye uygulamayı açtığında konumu otomatik olarak burada görünecek.</p>
           </div>
         )}
         <div style={{position:"absolute",top:10,left:10,background:"rgba(255,255,255,.92)",borderRadius:8,padding:"5px 12px",display:"flex",alignItems:"center",gap:6,zIndex:1000}}>
           <span style={{width:7,height:7,borderRadius:"50%",background:"#4caf50",display:"inline-block",animation:"pulse 1.5s infinite"}}/>
           <span style={{fontSize:11,fontWeight:700,color:"#4caf50"}}>CANLI</span>
         </div>
+        <div style={{position:"absolute",bottom:10,right:10,background:"rgba(255,255,255,.92)",borderRadius:9,padding:"8px 12px",fontSize:11,zIndex:1000}}>
+          {[["#4caf50","🛵 Aktif"],["#f9a825","🛵 Mola"],["#e53935","🛵 Kapalı"],["#fb8c00","📦 Onaylandı"],["#1e88e5","📦 Teslimatta"]].map(([c,l])=>(
+            <div key={l} style={{display:"flex",alignItems:"center",gap:5,marginBottom:2}}>
+              <span style={{width:9,height:9,borderRadius:"50%",background:c,display:"inline-block"}}/>
+              <span style={{color:"#636366"}}>{l}</span>
+            </div>
+          ))}
+        </div>
       </div>
       <div style={{background:"#fff",borderTop:"1px solid #e5e5ea",padding:"7px 11px",flexShrink:0}}>
         <div style={{display:"flex",gap:8,overflowX:"auto"}}>
           {db.couriers.map(c=>{
-            const bg={active:"#e9f9ee",break:"#fff8e1",off:"#f2f2f7"}[c.status]||"#f2f2f7";
-            const tc={active:"#4caf50",break:"#f9a825",off:"#9e9e9e"}[c.status]||"#9e9e9e";
+            const {color} = pinFor(c);
+            const pkg = activePkgOf(c.id);
+            const bg = pkg ? color+"22" : {active:"#e9f9ee",break:"#fff8e1",off:"#fdecea"}[c.status]||"#fdecea";
             return(
-              <div key={c.id} onClick={()=>setSel(sel?.id===c.id?null:c)} style={{flexShrink:0,background:bg,borderRadius:10,padding:"8px 12px",cursor:"pointer",border:"1.5px solid "+(sel?.id===c.id?tc:"transparent"),minWidth:100}}>
+              <div key={c.id} onClick={()=>setSel(sel?.id===c.id?null:c)} style={{flexShrink:0,background:bg,borderRadius:10,padding:"8px 12px",cursor:"pointer",border:"1.5px solid "+(sel?.id===c.id?color:"transparent"),minWidth:100}}>
                 <p style={{fontWeight:700,fontSize:11}}>{c.name.split(" ")[0]}</p>
-                <p style={{fontSize:11,color:tc,fontWeight:600,marginTop:1}}>{c.status==="active"?"Aktif":c.status==="break"?"Mola":"Kapalı"}</p>
+                <p style={{fontSize:11,color,fontWeight:600,marginTop:1}}>{pkg?("📦 "+pkg.status):(c.status==="active"?"Aktif":c.status==="break"?"Mola":"Kapalı")}</p>
                 <p style={{fontSize:11,color:"#8e8e93",marginTop:1}}>{c.km}km·₺{c.earnings}{!c.lat&&" · 📍—"}</p>
               </div>
             );
